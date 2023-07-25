@@ -1,0 +1,521 @@
+---
+title: "IGS Project"
+author: "Peike Wang"
+date: "1/31/2023"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r message=FALSE}
+library(readr)
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(glmnet)
+```
+
+```{r message=FALSE}
+claims <- read_csv("Claims_v1.csv")
+wsw <- read_csv("WeatherStationWeights.csv")
+```
+
+```{r}
+wa <- fread("WeatherActuals.csv")
+```
+
+```{r message=FALSE}
+holidays <- read_csv("holidays2.csv")
+```
+
+
+```{r}
+wa_clean <- drop_na(wa)
+wa_clean <- select(wa_clean, -2, -5, -6, -7, -8, -14, -19, -20)
+```
+
+
+```{r}
+wa_reduce <- wa_clean %>%
+  group_by(ActualUTCDate, WeatherStationId) %>%
+  mutate(Ave_Temp = median(Temperature)) %>%
+  mutate(Ave_DewTemp = median(DewPointTemperature)) %>%
+  mutate(Ave_Humidity = median(Humidity)) %>%
+  mutate(Ave_HeatIndex = median(HeatIndex))
+```
+
+
+```{r}
+wa_reduce <- select(wa_reduce, -3:-12)
+wa_reduce <- wa_reduce %>% distinct(ActualUTCDate, .keep_all = TRUE)
+```
+
+```{r}
+colnames(wa_reduce)[2] <- "UTCDate"
+colnames(wsw)[1] <- "UTCDate"
+```
+
+```{r}
+wsw$UTCDate <- as.Date(wsw$UTCDate)
+wa_reduce$UTCDate <- as.Date(wa_reduce$UTCDate)
+```
+
+```{r}
+combine <- left_join(x = wa_reduce, y = wsw, by = c("WeatherStationId" = "WeatherStationId", "UTCDate" = "UTCDate"))
+combine[is.na(combine)] <- 0
+```
+
+```{r}
+combine <- merge(combine, claims, by = "UTCDate")
+```
+
+```{r}
+combine <- select(combine, -8, -9)
+```
+
+```{r}
+weighted_combine <- combine %>%
+  group_by(UTCDate) %>%
+  mutate(Weighted_Temp = sum(Ave_Temp * Weight)) %>%
+  mutate(Weighted_DewTemp = sum(Ave_DewTemp * Weight)) %>%
+  mutate(Weighted_Humidity = sum(Ave_Humidity * Weight)) %>%
+  mutate(Weighted_HeatIndex = sum(Ave_HeatIndex * Weight))
+```
+
+```{r}
+weighted_combine <- weighted_combine %>% distinct(UTCDate, .keep_all = TRUE)
+```
+
+```{r}
+weighted_combine <- weighted_combine[-c(2:7)]
+```
+
+
+```{r}
+holidays$date <- as.Date(holidays$date)
+weighted_combine$holiday <- weighted_combine$UTCDate%in%holidays$date
+```
+
+
+```{r}
+weighted_combine <- weighted_combine[order(weighted_combine$UTCDate),]
+```
+
+```{r}
+#difference = diff(weighted_combine$Weighted_Temp, lag=1)
+#difference <- append(0, difference)
+```
+
+```{r}
+#weighted_combine$Difference_Temp <- difference
+```
+
+```{r}
+weighted_combine$Difference_Temp <- weighted_combine$Weighted_Temp - (lag(weighted_combine$Weighted_Temp, 1, default = 0) + lag(weighted_combine$Weighted_Temp, 2, default = 0) + lag(weighted_combine$Weighted_Temp, 3, default = 0))/3
+```
+
+
+```{r}
+weighted_combine$weekdays <- weekdays(as.POSIXlt(weighted_combine$UTCDate))
+```
+
+```{r}
+dates <- data.frame(UTCDate = weighted_combine$UTCDate,
+year = as.numeric(format(weighted_combine$UTCDate, format = "%Y")),
+month = as.numeric(format(weighted_combine$UTCDate, format = "%m")))
+```
+
+```{r}
+weighted_combine <- merge(weighted_combine, dates, by = "UTCDate")
+```
+
+
+```{r}
+weighted_combine$summer <- ifelse(weighted_combine$month>=4 & weighted_combine$month<=7 & weighted_combine$Weighted_Temp >= 65 & weighted_combine$weekdays!="Saturday" & weighted_combine$weekdays!="Sunday" & weighted_combine$weekdays!="Friday",1,0)
+```
+
+```{r}
+weighted_combine$winter <- ifelse(weighted_combine$month>=11 & weighted_combine$month<=2 & weighted_combine$Weighted_Temp <= 40 & weighted_combine$weekdays!="Saturday" & weighted_combine$weekdays!="Sunday" & weighted_combine$weekdays!="Friday",1,0)
+```
+
+```{r}
+#weighted_combine <- filter(weighted_combine, year >= 2021)
+```
+
+```{r}
+weighted_combine$Monday <- ifelse(weighted_combine$weekdays=="Monday",1,0)
+```
+
+```{r}
+weighted_combine$Tuesday <- ifelse(weighted_combine$weekdays=="Tuesday",1,0)
+```
+
+
+
+### What's Ratio is big
+
+```{r}
+weighted_combine[weighted_combine$ScaledClaimsRatio>=0.0015,]
+```
+
+
+
+### Export Data
+
+```{r}
+write.csv(weighted_combine,file='weighted_combine.csv')
+```
+
+### Load existing data
+
+```{r message=FALSE}
+weighted_combine <- read_csv("weighted_combine.csv")
+weighted_combine <- weighted_combine[-1]
+weighted_combine <- weighted_combine[-c(6:10)]
+```
+
+
+### Plot
+
+```{r}
+ggplot() + geom_point(data=weighted_combine, aes(x=weekdays, y=ScaledClaimsRatio), size=1) +
+  scale_x_discrete(limits = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+```
+
+```{r}
+ggplot() + geom_point(data=weighted_combine, aes(x=UTCDate, y=ScaledClaimsRatio), size=1) + geom_smooth(data=weighted_combine, aes(x=UTCDate, y=ScaledClaimsRatio),method=NULL) + labs(x="Date", y="Scaled Claim Ratio", title="Calim Ratio by Date")
+```
+
+```{r}
+ggplot() + geom_point(data=weighted_combine, aes(x=Weighted_Temp, y=ScaledClaimsRatio), size=1)
+```
+
+```{r}
+ggplot() + geom_point(data=weighted_combine, aes(x=Difference_Temp, y=ScaledClaimsRatio), size=1) + geom_smooth(data=weighted_combine, aes(x=Difference_Temp, y=ScaledClaimsRatio),method=NULL) + labs(x="Rolling Difference in Temperature", y="Scaled Claim Ratio", title="Calim Ratio by Rolling Difference")
+```
+
+```{r}
+ggplot() + geom_point(data=weighted_combine, aes(x=UTCDate, y=ScaledClaimsRatio, color=summer), size=1) + labs(x="Date", y="Scaled Claim Ratio", title="Calim Ratio by Date Group by summer")
+```
+
+```{r}
+ggplot() + geom_point(data=weighted_combine, aes(x=UTCDate, y=ScaledClaimsRatio, color=Monday), size=1) + labs(x="Date", y="Scaled Claim Ratio", title="Calim Ratio by Date Group by Monday")
+```
+
+### AIC
+
+```{r}
+library(MASS)
+```
+
+```{r}
+null <- lm(ScaledClaimsRatio~1,data=weighted_combine)
+full <- lm(ScaledClaimsRatio~.,data=weighted_combine)
+n <- dim(weighted_combine)[1]
+stepAIC(null, scope = list(lower=null,upper=full), direction = "both", trace = 0, k=2)
+```
+
+```{r}
+corr <- cor(weighted_combine[,])
+round(corr, 2)
+```
+
+### LASSO
+
+```{r}
+set.seed(491)
+
+ind <- sample(2, nrow(weighted_combine), replace=TRUE, prob=c(0.7, 0.3))
+train <- weighted_combine[ind==1,]
+test <- weighted_combine[ind==2,]
+  
+x_train = model.matrix(ScaledClaimsRatio~.,train)[,-1]
+y_train = train$ScaledClaimsRatio
+x_test = model.matrix(ScaledClaimsRatio~.,test)[,-1]
+y_test = test$ScaledClaimsRatio
+  
+lasso.cv = cv.glmnet(x_train,y_train,alpha=1)
+lambda1.cv = lasso.cv$lambda.min
+  
+fit.lasso = glmnet(x_train,y_train,alpha=1,lambda=lambda1.cv)
+pred_lasso = predict(fit.lasso,newx=x_test)
+  
+MAPE_rf = sum(abs(pred_lasso - y_test))/sum(y_test)
+RMSE_rf = sqrt(mean((pred_lasso - y_test)^2))
+
+MAPE_rf
+RMSE_rf
+```
+
+
+
+### Random Forest
+
+```{r}
+library(randomForest)
+```
+
+```{r}
+MAPE_rf <- c()
+RMSE_rf <- c()
+n <- 10
+
+for(i in 1:n){
+  ind <- sample(2, nrow(weighted_combine), replace=TRUE, prob=c(0.7, 0.3))
+  train <- weighted_combine[ind==1,]
+  test <- weighted_combine[ind==2,]
+  y_test <- test$ScaledClaimsRatio
+  
+  rf = randomForest(ScaledClaimsRatio~., importance = TRUE, mtry=5, data=train)
+  pred_rf = predict(rf, test)
+  
+  MAPE_rf[i] = sum(abs(pred_rf - y_test))/sum(y_test)
+  RMSE_rf[i] = sqrt(mean((pred_rf - y_test)^2))
+}
+
+mean(MAPE_rf)
+mean(RMSE_rf)
+```
+
+
+
+### Check
+
+```{r}
+set.seed(491)
+
+ind <- sample(2, nrow(weighted_combine), replace=TRUE, prob=c(0.7, 0.3))
+train <- weighted_combine[ind==1,]
+test <- weighted_combine[ind==2,]
+y_test <- test$ScaledClaimsRatio
+  
+rf = randomForest(ScaledClaimsRatio~., importance = TRUE, mtry=10, data=train)
+pred_rf = predict(rf, test)
+  
+MAPE_rf = sum(abs(pred_rf - y_test))/sum(y_test)
+RMSE_rf = sqrt(mean((pred_rf - y_test)^2))
+
+MAPE_rf
+RMSE_rf
+```
+
+```{r}
+set.seed(491)
+
+ind <- sample(2, nrow(weighted_combine), replace=TRUE, prob=c(0.7, 0.3))
+train <- weighted_combine[ind==1,]
+test <- weighted_combine[ind==2,]
+y_test <- test$ScaledClaimsRatio
+  
+rf = randomForest(ScaledClaimsRatio~., importance = TRUE, mtry=10, data=train)
+pred_rf = predict(rf, test)
+  
+MAPE_rf = sum(abs(pred_rf - y_test))/sum(y_test)
+RMSE_rf = sqrt(mean((pred_rf - y_test)^2))
+
+MAPE_rf
+RMSE_rf
+```
+
+
+### What's diff is big
+
+```{r}
+check <- test %>%
+  mutate(diff = pred_rf - y_test)
+```
+
+```{r}
+ggplot() + geom_point(data=check, aes(x=UTCDate, y=diff))
+```
+
+```{r}
+check[abs(check$diff)>=0.0003,]
+```
+
+```{r}
+ggplot() + geom_point(data=check, aes(x=Weighted_Temp, y=diff))
+```
+
+```{r}
+ggplot() + geom_point(data=check, aes(x=weekdays, y=diff))
+```
+
+
+
+
+
+### Cross Validation
+
+```{r}
+set.seed(491)
+
+n <- dim(weighted_combine)[1]
+
+folds <- matrix(sample(1:n), nrow=10)
+
+## Conducting CV for RMSEs
+RMSEs <- c()
+MAPEs <- c()
+
+for (i in 1:10){
+weath_train <- weighted_combine[as.vector(folds[-i,]),]
+weath_test <- weighted_combine[as.vector(folds[i,]),]
+
+randfor_med_model <- randomForest(ScaledClaimsRatio ~ .,data = weath_train, importance = TRUE, mtry = 5)
+
+pred <- predict(randfor_med_model, newdata = weath_test)
+
+MAPEs[i] = sum(abs(pred - weath_test$ScaledClaimsRatio))/sum(weath_test$ScaledClaimsRatio)
+RMSEs[i] = sqrt(mean((pred-weath_test$ScaledClaimsRatio)^2))
+}
+
+mean(MAPEs)
+mean(RMSEs)
+```
+
+```{r}
+set.seed(491)
+
+n <- dim(weighted_combine)[1]
+
+folds <- matrix(sample(1:n), nrow=10)
+
+## Conducting CV for RMSEs
+RMSEs <- c()
+MAPEs <- c()
+
+for (i in 1:10){
+weath_train <- weighted_combine[as.vector(folds[-i,]),]
+weath_test <- weighted_combine[as.vector(folds[i,]),]
+
+randfor_med_model <- randomForest(ScaledClaimsRatio ~ .,data = weath_train, importance = TRUE, mtry = 5)
+
+pred <- predict(randfor_med_model, newdata = weath_test)
+
+MAPEs[i] = sum(abs(pred - weath_test$ScaledClaimsRatio))/sum(weath_test$ScaledClaimsRatio)
+RMSEs[i] = sqrt(mean((pred-weath_test$ScaledClaimsRatio)^2))
+}
+
+mean(MAPEs)
+mean(RMSEs)
+```
+
+
+
+### New Data
+
+```{r message=FALSE}
+new_data <- read_csv("data_with_testx.csv")
+```
+
+```{r}
+new_data <- select(new_data, -1:-4, -10:-15)
+```
+
+```{r}
+colnames(new_data)[1] <- "UTCDate"
+colnames(new_data)[2] <- "Weighted_Temp"
+colnames(new_data)[3] <- "Weighted_DewTemp"
+colnames(new_data)[4] <- "Weighted_Humidity"
+colnames(new_data)[5] <- "Weighted_HeatIndex"
+```
+
+```{r}
+holidays$date <- as.Date(holidays$date)
+new_data$holiday <- new_data$UTCDate%in%holidays$date
+```
+
+```{r}
+new_data <- new_data[order(new_data$UTCDate),]
+```
+
+```{r}
+new_data$Difference_Temp <- new_data$Weighted_Temp - (lag(new_data$Weighted_Temp, 1, default = 0) + lag(new_data$Weighted_Temp, 2, default = 0) + lag(new_data$Weighted_Temp, 3, default = 0))/3
+```
+
+
+```{r}
+new_data$weekdays <- weekdays(as.POSIXlt(new_data$UTCDate))
+```
+
+```{r}
+dates <- data.frame(UTCDate = new_data$UTCDate,
+year = as.numeric(format(new_data$UTCDate, format = "%Y")),
+month = as.numeric(format(new_data$UTCDate, format = "%m")))
+```
+
+```{r}
+new_data <- merge(new_data, dates, by = "UTCDate")
+```
+
+```{r}
+new_data$summer <- ifelse(new_data$month>=4 & new_data$month<=7 & new_data$Weighted_Temp >= 65 & new_data$weekdays!="Saturday" & new_data$weekdays!="Sunday" & new_data$weekdays!="Friday",1,0)
+```
+
+```{r}
+new_data$winter <- ifelse(new_data$month>=11 & new_data$month<=2 & new_data$Weighted_Temp <= 40 & new_data$weekdays!="Saturday" & new_data$weekdays!="Sunday" & new_data$weekdays!="Friday",1,0)
+```
+
+```{r}
+new_data$Monday <- ifelse(new_data$weekdays=="Monday",1,0)
+```
+
+```{r}
+new_data$Tuesday <- ifelse(new_data$weekdays=="Tuesday",1,0)
+```
+
+```{r}
+test2 <- new_data %>% filter(year >= 2022 & month >= 11)
+```
+
+### Random Forest
+
+```{r}
+rf = randomForest(ScaledClaimsRatio~., importance = TRUE, mtry=5, data=weighted_combine)
+pred_rf2 = predict(rf, test2)
+```
+
+```{r}
+test_set <- c(1:61)
+test_set <- as.data.frame(test_set)
+test_set <- test_set %>% 
+  mutate(date = test2$UTCDate) %>%
+  mutate(predictions = pred_rf2)
+```
+
+### LASSO
+
+```{r}
+x_train = model.matrix(ScaledClaimsRatio~.,weighted_combine)[,-1]
+y_train = weighted_combine$ScaledClaimsRatio
+x_test = model.matrix(~.,test2)[,-1]
+
+lasso.cv = cv.glmnet(x_train,y_train,alpha=1)
+lambda1.cv = lasso.cv$lambda.min
+  
+fit.lasso = glmnet(x_train,y_train,alpha=1,lambda=lambda1.cv)
+pred_lasso = predict(fit.lasso,newx=x_test)
+```
+
+```{r}
+pred_lasso <- ifelse(pred_lasso<0,0,pred_lasso)
+```
+
+```{r}
+test_set <- c(1:61)
+test_set <- as.data.frame(test_set)
+test_set <- test_set %>% 
+  mutate(date = test2$UTCDate) %>%
+  mutate(predictions = pred_lasso)
+```
+
+### Result
+
+```{r}
+test_set <- select(test_set,-1,)
+```
+
+```{r}
+write.csv(test_set,"predictions_team1.csv")
+```
